@@ -12,12 +12,21 @@ const ERAS = {
 };
 const KINDS = {
   q: { label: "Вопрос", hint: "Ответьте своими словами", code: "В" },
+  a: { label: "План", hint: "Вспомните план ответа по билету", code: "П" },
   d: { label: "Дата", hint: "Назовите дату или период", code: "Д" },
   p: { label: "Личность", hint: "Кто это и чем важен в теме?", code: "Л" },
   t: { label: "Термин", hint: "Дайте определение", code: "Т" },
   s: { label: "Источник", hint: "Что это за документ и что он доказывает?", code: "И" },
 };
-const KIND_ORDER = ["q", "d", "p", "t", "s"];
+const KIND_ORDER = ["q", "a", "d", "p", "t", "s"];
+// До экзамена 4 дня: по умолчанию учим только вопросы и планы ответа, остальное по желанию
+const CORE_KINDS = ["q", "a"];
+const NEW_PER_DAY = 50;
+const DAYS = [
+  { from: 1, to: 9, title: "Империя, революции, СССР в 1920–1930-е" },
+  { from: 10, to: 18, title: "Внешняя политика 1930-х, война, послевоенный СССР" },
+  { from: 19, to: 26, title: "Культура и спорт СССР, перестройка, новая Россия" },
+];
 
 // Карточки собираются из данных тем
 const CARDS = [];
@@ -30,18 +39,21 @@ for (const T of TOPICS) {
     T.ids.push(id);
   });
   add("q", T.cards, r => r);
+  add("a", [T.plan], plan => [T.title, plan]);
   add("d", T.dates, ([d, e]) => [e, d]);
   add("p", T.people, r => r);
   add("t", T.terms, r => r);
   add("s", T.docs, r => r);
 }
 const CARD = Object.fromEntries(CARDS.map(c => [c.id, c]));
+const CORE_COUNT = CARDS.filter(c => CORE_KINDS.includes(c.kind)).length;
 const TOPIC = Object.fromEntries(TOPICS.map(t => [t.n, t]));
 const pad = n => String(n).padStart(2, "0");
 
 // ---------- Интервальное повторение (упрощённый алгоритм Anki) ----------
-const MIN = 60e3, HOUR = 36e5, DAY = 864e5, CUTOFF = 4 * HOUR, MAX_IVL = 45;
-const LEARN = [1 * MIN, 10 * MIN], RELEARN = [10 * MIN];
+// Интервал не длиннее 2 дней, чтобы до экзамена каждая карточка успела вернуться.
+const MIN = 60e3, HOUR = 36e5, DAY = 864e5, CUTOFF = 4 * HOUR, MAX_IVL = 2;
+const LEARN = [1 * MIN, 10 * MIN], RELEARN = LEARN;
 
 function studyDayStart(now) {
   const d = new Date(now - CUTOFF);
@@ -71,12 +83,11 @@ function schedule(prev, g, now) {
       else st.due = now + steps[st.step];
     } else toReview(st, st.s === "l" ? 4 : st.ivl + 1, now);
   } else {
-    if (g === 1) {
-      st.l += 1; st.e = Math.max(1.3, st.e - 0.2);
-      st.s = "rl"; st.step = 0; st.ivl = 1; st.due = now + RELEARN[0];
-    } else if (g === 2) { st.e = Math.max(1.3, st.e - 0.15); toReview(st, Math.max(st.ivl + 1, st.ivl * 1.2), now); }
-    else if (g === 3) toReview(st, Math.max(st.ivl + 1, st.ivl * st.e), now);
-    else { toReview(st, Math.max(st.ivl + 1, st.ivl * st.e * 1.3), now); st.e += 0.15; }
+    // Снова — заново через минуту; Трудно — ещё раз сегодня; Хорошо — завтра; Легко — через 2 дня
+    st.ivl = 1;
+    if (g === 1) { st.l += 1; st.s = "rl"; st.step = 0; st.due = now + RELEARN[0]; }
+    else if (g === 2) { st.s = "rl"; st.step = 1; st.due = now + RELEARN[1]; }
+    else toReview(st, g === 3 ? 1 : 2, now);
   }
   st.e = Math.round(st.e * 100) / 100;
   st.t = now;
@@ -93,13 +104,15 @@ function intervalLabel(prev, g, now) {
 const LS_KEY = "hist-exam-srs-v1";
 const blank = () => ({
   v: 1, cards: {}, day: "", newToday: 0, extraToday: 0,
-  settings: { newPerDay: 30, deck: "all", kinds: KIND_ORDER.slice() }, settingsAt: 0,
+  settings: { v: 2, newPerDay: NEW_PER_DAY, deck: "all", kinds: CORE_KINDS.slice() }, settingsAt: 0,
 });
 let S = blank();
 try {
   const raw = localStorage.getItem(LS_KEY);
   if (raw) S = Object.assign(blank(), JSON.parse(raw));
 } catch (e) { /* хранилище недоступно — работаем в памяти */ }
+// Настройки первой версии были рассчитаны на все 764 карточки — заменяем их новыми
+if (!S.settings || S.settings.v !== 2) { S.settings = blank().settings; S.settingsAt = Date.now(); }
 S.settings = Object.assign(blank().settings, S.settings);
 
 function rollDay() {
@@ -143,9 +156,10 @@ function merge(remote) {
     S.newToday = Math.max(S.newToday, remote.newToday || 0);
     S.extraToday = Math.max(S.extraToday, remote.extraToday || 0);
   }
-  if ((remote.settingsAt || 0) > (S.settingsAt || 0)) {
-    S.settings = Object.assign(blank().settings, remote.settings); S.settingsAt = remote.settingsAt; changed = true;
-  } else if ((S.settingsAt || 0) > (remote.settingsAt || 0)) needPush = true;
+  const rs = remote.settings && remote.settings.v === 2 ? remote : { settingsAt: 0 };
+  if ((rs.settingsAt || 0) > (S.settingsAt || 0)) {
+    S.settings = Object.assign(blank().settings, rs.settings); S.settingsAt = rs.settingsAt; changed = true;
+  } else if ((S.settingsAt || 0) > (rs.settingsAt || 0)) needPush = true;
   return { changed, needPush };
 }
 function schedulePush() {
@@ -233,9 +247,13 @@ function pickNext(now) {
   return null;
 }
 function topicProgress(T) {
-  let learned = 0;
-  for (const id of T.ids) { const st = S.cards[id]; if (st && st.s === "r") learned++; }
-  return { learned, total: T.ids.length };
+  let learned = 0, total = 0;
+  for (const id of T.ids) {
+    if (!S.settings.kinds.includes(CARD[id].kind)) continue;
+    total++;
+    const st = S.cards[id]; if (st && st.s === "r") learned++;
+  }
+  return { learned, total };
 }
 
 // ---------- Отрисовка ----------
@@ -266,15 +284,37 @@ function listHTML(active) {
 }
 function overallStats() {
   const now = Date.now();
-  let learned = 0, started = 0, due = 0;
+  let learned = 0, started = 0, due = 0, fresh = 0;
   for (const c of CARDS) {
+    if (!S.settings.kinds.includes(c.kind)) continue;
     const st = S.cards[c.id];
-    if (!st || st.s === "n") continue;
+    if (!st || st.s === "n") { fresh++; continue; }
     started++;
     if (st.s === "r") learned++;
     if (st.due <= now) due++;
   }
-  return { total: CARDS.length, learned, started, due };
+  return { today: Math.min(fresh, newLimitLeft()), learned, started, due };
+}
+function planHTML() {
+  const stats = DAYS.map(D => {
+    let total = 0, seen = 0;
+    for (const c of CARDS) {
+      if (c.n < D.from || c.n > D.to || !S.settings.kinds.includes(c.kind)) continue;
+      total++;
+      const st = S.cards[c.id]; if (st && st.s !== "n") seen++;
+    }
+    return { total, seen };
+  });
+  let cur = stats.findIndex(s => s.seen < s.total);
+  if (cur < 0) cur = DAYS.length;
+  const day = (i, head, body) => `<li${i === cur ? ' class="now"' : ""}><div><b>${head}</b>${i === cur ? ' <span class="stamp">сейчас</span>' : ""}<p>${body}</p></div></li>`;
+  return `<ol class="steps days">
+    ${DAYS.map((D, i) => day(i, `День ${i + 1} · темы ${pad(D.from)}–${pad(D.to)}`,
+      `${D.title}. Теория ${D.to - D.from + 1} тем, затем их карточки и повторы. Вечером — два случайных билета вслух.
+       <span class="meta">Карточек пройдено: ${stats[i].seen} из ${stats[i].total}</span>`)).join("")}
+    ${day(DAYS.length, "День 4 · повторение",
+      "Новых карточек нет, только повторы. Затем 5–6 случайных билетов вслух на время; по слабым темам перечитайте «Суть» и «План ответа». Вечером выспитесь: память закрепляется во сне.")}
+  </ol>`;
 }
 function critTable() {
   return `<div class="table-wrap"><table class="crit-table">
@@ -292,7 +332,7 @@ function renderOverview() {
     <section class="hero">
       <span class="stamp">Устный экзамен · билет из 2 вопросов</span>
       <h1>Подготовка к экзамену по истории России</h1>
-      <p class="lead">26 тем от рубежа XIX–XX веков до 2022 года. В каждой — суть, план ответа на 3–5 минут, теория, хронология, личности, термины, документы и место России в мире. Карточки для повторения собраны из тех же тем.</p>
+      <p class="lead">26 тем от рубежа XIX–XX веков до 2022 года. В каждой — суть, план ответа на 3–5 минут, теория, документы и место России в мире. Подготовка рассчитана на 4 дня: три дня по 8–9 тем с карточками, четвёртый — повторение и пробные билеты.</p>
       <div class="row">
         <a class="btn primary" href="#cards">Учить карточки</a>
         ${last && TOPIC[last] ? `<a class="btn" href="#t-${last}">Продолжить: тема ${pad(last)}</a>` : `<a class="btn" href="#t-1">Начать с темы 01</a>`}
@@ -300,8 +340,10 @@ function renderOverview() {
         <a class="btn quiet" href="#guide">Как готовиться →</a>
       </div>
     </section>
+    <h2 class="sec">План на 4 дня</h2>
+    ${planHTML()}
     <div class="stats">
-      <div><span class="lbl">Карточек</span><b>${s.total}</b></div>
+      <div><span class="lbl">Новых на сегодня</span><b>${s.today}</b></div>
       <div><span class="lbl">Начато</span><b>${s.started}</b></div>
       <div><span class="lbl">Выучено</span><b>${s.learned}</b></div>
       <div><span class="lbl">К повтору сейчас</span><b>${s.due}</b></div>
@@ -384,7 +426,7 @@ function renderStudy() {
         <div class="fc-body">
           <span class="lbl">${K.label} · ${K.hint}</span>
           <p class="q">${current.q}</p>
-          <div class="ans"${revealed ? "" : " hidden"}><div class="divider"><span class="lbl">Ответ</span></div><p>${current.a}</p></div>
+          <div class="ans"${revealed ? "" : " hidden"}><div class="divider"><span class="lbl">Ответ</span></div>${Array.isArray(current.a) ? `<ol>${current.a.map(x => `<li>${x}</li>`).join("")}</ol>` : `<p>${current.a}</p>`}</div>
         </div>
         <span class="hole" aria-hidden="true"></span>
       </div>
@@ -479,7 +521,7 @@ function guideHTML() {
     </ol>
 
     <h2>Как работают карточки</h2>
-    <p>Карточки устроены по принципу интервального повторения, как в Anki. Программа показывает карточку в момент, когда вы вот-вот её забудете: сначала через минуту и десять минут, потом через день, затем через 3, 7, 15 дней и дальше. Так факты переходят в долгую память, а время уходит только на то, что вы ещё не знаете.</p>
+    <p>Карточки устроены по принципу интервального повторения, как в Anki: программа возвращает карточку, когда вы вот-вот её забудете, и время уходит только на то, что вы ещё не знаете. В обычном Anki интервалы растут до недель и месяцев, но до экзамена 4 дня, поэтому здесь интервал не больше двух дней. Новая карточка возвращается через минуту, через десять минут и на следующий день, так что до экзамена каждая успеет вернуться несколько раз.</p>
     <ol>
       <li>Прочитайте вопрос и <b>ответьте вслух или про себя до того, как откроете ответ</b>. Узнать ответ после показа ≠ вспомнить его.</li>
       <li>Нажмите «Показать ответ» и честно оцените себя:</li>
@@ -487,32 +529,29 @@ function guideHTML() {
     <div class="table-wrap"><table class="gtable">
       <thead><tr><th>Кнопка</th><th>Когда нажимать</th><th>Что произойдёт</th></tr></thead>
       <tbody>
-        <tr><td style="color:var(--again)">Снова</td><td>Не вспомнили или ошиблись в главном</td><td>Карточка вернётся через минуту, интервал начнётся заново</td></tr>
-        <tr><td style="color:var(--hard)">Трудно</td><td>Вспомнили с большим трудом или частично</td><td>Интервал вырастет немного</td></tr>
-        <tr><td style="color:var(--accent)">Хорошо</td><td>Вспомнили правильно, немного подумав</td><td>Обычный рост интервала, основная кнопка</td></tr>
-        <tr><td style="color:var(--easy)">Легко</td><td>Ответ пришёл мгновенно</td><td>Большой скачок интервала</td></tr>
+        <tr><td style="color:var(--again)">Снова</td><td>Не вспомнили или ошиблись в главном</td><td>Вернётся через минуту и пройдёт шаги заново</td></tr>
+        <tr><td style="color:var(--hard)">Трудно</td><td>Вспомнили с большим трудом или частично</td><td>Ещё раз сегодня, через 6–10 минут</td></tr>
+        <tr><td style="color:var(--accent)">Хорошо</td><td>Вспомнили правильно, немного подумав</td><td>Следующий шаг, а после шагов — завтра. Основная кнопка</td></tr>
+        <tr><td style="color:var(--easy)">Легко</td><td>Ответ пришёл мгновенно</td><td>Вернётся через 2 дня</td></tr>
       </tbody></table></div>
     <p>Под каждой кнопкой написано, когда карточка появится снова. Если вспомнили наполовину, жмите «Трудно», а не «Хорошо»: завышенная оценка — главная причина, по которой повторение перестаёт работать.</p>
-    <p><b>Типы карточек.</b> «Вопрос» — причины, итоги, сравнения; «Дата» — назвать дату события; «Личность» — кто это и что сделал; «Термин» — определение; «Источник» — что за документ и что он доказывает. Ненужные типы можно выключить кнопками над счётчиками.</p>
+    <p><b>Типы карточек.</b> По умолчанию включены два типа: «Вопрос» — причины, итоги, сравнения, и «План» — по формулировке билета вспомнить план ответа. Это ${CORE_COUNT} карточек, по 5–6 на тему: столько реально выучить за 4 дня. Типы «Дата», «Личность», «Термин» и «Источник» включайте кнопками над счётчиками, только если останется время. Те же даты, имена и документы есть на странице каждой темы.</p>
     <p><b>Колода.</b> Можно учить всё сразу (новые карточки идут по порядку тем), одну эпоху или одну тему — например, сразу после чтения её теории. Кнопка «Учить карточки темы» внизу каждой темы открывает именно её.</p>
-    <p><b>Лимит новых.</b> По умолчанию 30 новых карточек в день — это около 30–40 минут вместе с повторениями. Всего карточек ${CARDS.length}, поэтому при 30 в день все новые пройдут примерно за ${Math.ceil(CARDS.length / 30)} дней. Если до экзамена меньше, увеличьте лимит в настройках или оставьте только типы «Вопрос» и «Дата».</p>
+    <p><b>Лимит новых.</b> ${NEW_PER_DAY} новых карточек в день — это как раз темы одного дня плана, около часа вместе с повторениями. Новые идут по порядку тем, так что за три дня пройдут все ${CORE_COUNT}, а четвёртый день останется на повторение. Если начали на день позже, поднимите лимит в настройках или нажмите «Ещё 10 новых сегодня».</p>
     <p><b>Счётчики.</b> «Новые» — сколько новых осталось на сегодня, «Учу» — карточки на коротких шагах (минуты), «Повтор» — карточки, у которых подошёл срок повторения.</p>
     <p><b>Прогресс.</b> Если страница открыта на claude.ai, прогресс сохраняется в вашем аккаунте и одинаков на компьютере и телефоне. В остальных случаях он хранится в браузере. Строка под карточкой показывает, где он сейчас.</p>
     <p><b>Клавиши.</b> <kbd>Пробел</kbd> — показать ответ, повторное нажатие — «Хорошо»; <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> — оценки.</p>
 
-    <h2>План подготовки</h2>
-    <ol class="steps">
-      <li><div><b>Каждый день, 30–40 минут: карточки.</b> Сначала всё, что к повтору, затем новые. Пропуск дня не страшен, но повторения накопятся — лучше понемногу каждый день.</div></li>
-      <li><div><b>Каждый день, 1–2 темы теории.</b> Прочитайте тему, закройте её и расскажите вслух по «Плану ответа». Затем откройте карточки этой темы.</div></li>
-      <li><div><b>Раз в 2–3 дня: случайный билет.</b> Кнопка «Случайный билет» выдаёт две темы. Ответьте вслух на время, 3–5 минут на вопрос, потом сверьтесь с планом.</div></li>
-      <li><div><b>Последняя неделя.</b> Новые темы не берите: только повторение карточек и 2–3 билета в день вслух.</div></li>
-      <li><div><b>Накануне экзамена.</b> Пробегите «Суть» и «План ответа» всех 26 тем — это около часа. Выспитесь: память закрепляется во сне.</div></li>
-    </ol>
+    <h2>План на 4 дня</h2>
+    ${planHTML()}
+    <p><b>Как проходить тему.</b> Прочитайте «Суть» и «План ответа», затем теорию. Закройте страницу и расскажите тему вслух по плану за 2–3 минуты, потом откройте её карточки. На тему уходит 15–20 минут, на весь день — около 3–4 часов вместе с карточками и билетами.</p>
+    <p><b>Случайный билет</b> выдаёт две темы, как на экзамене. Отвечайте вслух на время, 3–5 минут на вопрос, потом сверьтесь со спрятанным планом. В первые дни берите билеты из уже пройденных тем: если выпала непройденная, вытяните другой.</p>
+    <p class="note">Отметка «сейчас» ставится по пройденным карточкам, а не по календарю: начали позже или ушли вперёд — план подстроится.</p>
 
     <h2>Типичные ошибки</h2>
     <ul>
       <li>Перечитывать теорию вместо того, чтобы вспоминать. Чтение создаёт ощущение знания, а вспоминание — само знание.</li>
-      <li>Учить все темы за одну-две ночи: через неделю останется малая часть.</li>
+      <li>Оставлять темы на последний вечер: четвёртый день нужен для повторения, а не для нового.</li>
       <li>Отвечать без дат, имён и документов — ответ получается «общими словами».</li>
       <li>Нажимать «Хорошо», когда ответ вспомнился лишь частично.</li>
     </ul>

@@ -220,6 +220,14 @@ h2.sec { font-family: var(--f-display); font-weight: 500; font-size: 19px; margi
 .divider { display: flex; align-items: center; gap: 12px; margin: 22px 0 14px; color: var(--muted); }
 .divider::before, .divider::after { content: ""; flex: 1; border-top: 1px dashed var(--rule); }
 .ans p { margin: 0; font-size: 17px; }
+.ans ol { margin: 0; padding-left: 24px; font-size: 17px; }
+.ans li { margin: 4px 0; padding-left: 4px; }
+.ans li::marker { font-family: var(--f-mono); color: var(--accent); }
+.steps.days > li { grid-template-columns: minmax(0, 1fr); }
+.steps.days > li::before { content: none; }
+.days > li.now { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.days p { margin: 6px 0 0; max-width: none; }
+.days .meta { display: block; margin-top: 6px; font-family: var(--f-mono); font-size: 13px; color: var(--muted); }
 .hole { position: absolute; left: 50%; bottom: 10px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: var(--paper); border: 1px solid var(--rule); }
 .actions { margin-top: 14px; }
 .actions .wide { width: 100%; min-height: 52px; }
